@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "warp-tpe-sampler"            # PyPI-имя (рекомендую через дефисы)
-version = "0.1.2"
+version = "0.1.3"
 description = "WarpTpeSampler: Cached TPE + embedded budget policy for Optuna"
 readme = "README.md"
 requires-python = ">=3.10"

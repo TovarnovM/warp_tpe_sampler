@@ -13,7 +13,9 @@ try:
     from optuna.samplers._tpe.sampler import _split_trials
     from optuna.trial import FrozenTrial, TrialState
 except Exception as e:  # pragma: no cover
-    raise RuntimeError("CachedTPESampler requires optuna to be installed and importable.") from e
+    raise RuntimeError(
+        "CachedTPESampler requires optuna to be installed and importable."
+    ) from e
 
 
 SearchSpaceKey = Tuple[str, ...]
@@ -318,11 +320,15 @@ class CachedTPESampler(_OptunaTPESampler):
             self._tls_state().reduce_n = None
 
     # ---------------- caching core ----------------
-    def _on_new_trial_context(self, study: "optuna.study.Study", trial: FrozenTrial) -> None:
+    def _on_new_trial_context(
+        self, study: "optuna.study.Study", trial: FrozenTrial
+    ) -> None:
         st = self._tls_state()
         study_id = getattr(study, "_study_id", id(study))
 
-        is_new = (st.active_study_id != study_id) or (st.active_trial_number != trial.number)
+        is_new = (st.active_study_id != study_id) or (
+            st.active_trial_number != trial.number
+        )
         if not is_new:
             return
 
@@ -341,7 +347,9 @@ class CachedTPESampler(_OptunaTPESampler):
             st.random_source = "forced"
             st.random_next_trial_once = False
         else:
-            coinflip_random = (self._epsilon > 0.0) and (float(self._rng.rng.random()) < self._epsilon)
+            coinflip_random = (self._epsilon > 0.0) and (
+                float(self._rng.rng.random()) < self._epsilon
+            )
             st.random_this_trial = coinflip_random
             st.random_source = "epsilon" if coinflip_random else None
         if st.random_this_trial:
@@ -363,7 +371,6 @@ class CachedTPESampler(_OptunaTPESampler):
             st.snapshot = None
             st.mpe_cache.clear()
 
-
     def _sample_random_relative(
         self,
         study: "optuna.study.Study",
@@ -373,10 +380,14 @@ class CachedTPESampler(_OptunaTPESampler):
         # NOTE: RandomSampler returns external representations.
         params: Dict[str, Any] = {}
         for name, dist in search_space.items():
-            params[name] = self._random_sampler.sample_independent(study, trial, name, dist)
+            params[name] = self._random_sampler.sample_independent(
+                study, trial, name, dist
+            )
         return params
 
-    def _get_finished_count_all(self, study: "optuna.study.Study", trial: FrozenTrial) -> int:
+    def _get_finished_count_all(
+        self, study: "optuna.study.Study", trial: FrozenTrial
+    ) -> int:
         self._on_new_trial_context(study, trial)
         st = self._tls_state()
 
@@ -396,7 +407,9 @@ class CachedTPESampler(_OptunaTPESampler):
         st.finished_count_cached = len(done)
         return st.finished_count_cached
 
-    def _ensure_snapshot(self, study: "optuna.study.Study", trial: FrozenTrial) -> _Snapshot:
+    def _ensure_snapshot(
+        self, study: "optuna.study.Study", trial: FrozenTrial
+    ) -> _Snapshot:
         self._on_new_trial_context(study, trial)
         st = self._tls_state()
 
@@ -409,7 +422,9 @@ class CachedTPESampler(_OptunaTPESampler):
         st.mpe_cache.clear()
         return snap
 
-    def _refresh_snapshot(self, study: "optuna.study.Study", trial: FrozenTrial) -> _Snapshot:
+    def _refresh_snapshot(
+        self, study: "optuna.study.Study", trial: FrozenTrial
+    ) -> _Snapshot:
         st = self._tls_state()
         st.timing.snapshot_refresh_n += 1
         with self._agg_lock:
@@ -421,7 +436,9 @@ class CachedTPESampler(_OptunaTPESampler):
             states = (TrialState.COMPLETE, TrialState.PRUNED)
 
         with self._timed("fetch_trials"):
-            trials_all = study._get_trials(deepcopy=False, states=states, use_cache=True)
+            trials_all = study._get_trials(
+                deepcopy=False, states=states, use_cache=True
+            )
 
         finished_total_all = int(
             sum(t.state in (TrialState.COMPLETE, TrialState.PRUNED) for t in trials_all)
@@ -457,7 +474,9 @@ class CachedTPESampler(_OptunaTPESampler):
                 self._constraints_func is not None,
             )
 
-        below, above, eps2_applied = self._maybe_apply_epsilon2_split(study, below, above)
+        below, above, eps2_applied = self._maybe_apply_epsilon2_split(
+            study, below, above
+        )
 
         if eps2_applied:
             st.timing.eps2_applied_n += 1
@@ -612,7 +631,10 @@ class CachedTPESampler(_OptunaTPESampler):
 
     # ---------------- overrides for gating + draw timing ----------------
     def _sample_relative(
-        self, study: "optuna.study.Study", trial: FrozenTrial, search_space: Dict[str, BaseDistribution]
+        self,
+        study: "optuna.study.Study",
+        trial: FrozenTrial,
+        search_space: Dict[str, BaseDistribution],
     ) -> Dict[str, Any]:
         if search_space == {}:
             return {}
@@ -635,30 +657,50 @@ class CachedTPESampler(_OptunaTPESampler):
     ) -> Any:
         self._on_new_trial_context(study, trial)
         if self._tls_state().random_this_trial:
-            return self._random_sampler.sample_independent(study, trial, param_name, param_distribution)
+            return self._random_sampler.sample_independent(
+                study, trial, param_name, param_distribution
+            )
 
         finished = self._get_finished_count_all(study, trial)
         if finished < self._n_startup_trials:
-            return self._random_sampler.sample_independent(study, trial, param_name, param_distribution)
+            return self._random_sampler.sample_independent(
+                study, trial, param_name, param_distribution
+            )
 
         # Keep upstream warning behavior approximately (without additional fetch)
         if self._warn_independent_sampling and self._multivariate:
             snap = self._ensure_snapshot(study, trial)
             if any(param_name in t.params for t in snap.trials_reduced):
-                from optuna.samplers._base import _INDEPENDENT_SAMPLING_WARNING_TEMPLATE
-                from optuna.logging import get_logger
+                tpl = None
+                try:
+                    from optuna.samplers._base import (
+                        _INDEPENDENT_SAMPLING_WARNING_TEMPLATE as tpl,
+                    )
+                except Exception:
+                    tpl = None
 
-                get_logger(__name__).warning(
-                    _INDEPENDENT_SAMPLING_WARNING_TEMPLATE.format(
+                if tpl is None:
+                    msg = (
+                        f"The parameter `{param_name}` in Trial#{trial.number} is sampled independently "
+                        f"using `{self._random_sampler.__class__.__name__}` instead of `{self.__class__.__name__}`. "
+                        "This can degrade optimization performance. "
+                        "You can suppress this warning by setting `warn_independent_sampling=False`."
+                    )
+                else:
+                    msg = tpl.format(
                         param_name=param_name,
                         trial_number=trial.number,
                         independent_sampler_name=self._random_sampler.__class__.__name__,
                         sampler_name=self.__class__.__name__,
-                        fallback_reason="dynamic search space is not supported for `multivariate=True`",
+                        fallback_reason="the parameter is not in the relative search space",
                     )
-                )
+                from optuna.logging import get_logger
 
-        params = self._sample(study, trial, {param_name: param_distribution}, use_trial_cache=True)
+                get_logger(__name__).warning(msg, stacklevel=2)
+
+        params = self._sample(
+            study, trial, {param_name: param_distribution}, use_trial_cache=True
+        )
         return params[param_name]
 
     def _sample(

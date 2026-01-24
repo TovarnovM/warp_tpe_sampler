@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "warp-tpe-sampler"            # PyPI-имя (рекомендую через дефисы)
-version = "0.1.1"
+version = "0.1.2"
 description = "WarpTpeSampler: Cached TPE + embedded budget policy for Optuna"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,7 +13,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "Mikhail Tovarnov" }]
 
 dependencies = [
-  "optuna>=4.1,<5",
+  "optuna>=4.0,<5",
 ]
 
 [project.optional-dependencies]

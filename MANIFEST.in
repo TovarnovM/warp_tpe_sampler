@@ -1,0 +1,26 @@
+include README.md
+include LICENSE
+include pyproject.toml
+
+recursive-include src *.py
+
+recursive-exclude * __pycache__
+recursive-exclude * *.py[cod]
+recursive-exclude * *.so
+recursive-exclude * *.dylib
+recursive-exclude * *.dll
+
+recursive-exclude * .DS_Store
+recursive-exclude * Thumbs.db
+recursive-exclude * .mypy_cache
+recursive-exclude * .pytest_cache
+recursive-exclude * .ruff_cache
+recursive-exclude * .coverage
+recursive-exclude * htmlcov
+recursive-exclude * dist
+recursive-exclude * build
+recursive-exclude * *.egg-info
+recursive-exclude * .eggs
+recursive-exclude * .idea1
+recursive-exclude * .vscode
+recursive-exclude * .devcontainer

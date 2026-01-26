@@ -24,7 +24,9 @@ try:
     import optuna
     from optuna.trial import FrozenTrial, TrialState
 except Exception as e:  # pragma: no cover
-    raise RuntimeError("WarpTpeSampler requires optuna to be installed and importable.") from e
+    raise RuntimeError(
+        "WarpTpeSampler requires optuna to be installed and importable."
+    ) from e
 
 from .cached_tpe_sampler import CachedTPESampler
 from .budget_policy import (
@@ -111,6 +113,10 @@ class WarpTpeConfig:
     # (Promoted from BudgetPolicyConfig to avoid nested config churn.)
     epsilon: float = 0.05
 
+    # Optional override for BudgetPolicyConfig.alpha.
+    # If set, it is applied when constructing the embedded BudgetedReductionPolicy.
+    alpha: Optional[float] = None
+
     epsilon2: float = 0.0
 
     # --- reduction (used on refresh) ---
@@ -142,7 +148,9 @@ def _mk_decision(action: Action, reduce_n: Optional[int], reason: str) -> Decisi
     )
 
 
-def _safe_set_trial_user_attr(study: "optuna.study.Study", trial: FrozenTrial, key: str, value: Any) -> None:
+def _safe_set_trial_user_attr(
+    study: "optuna.study.Study", trial: FrozenTrial, key: str, value: Any
+) -> None:
     """Set trial user attr from sampler hooks (FrozenTrial is immutable)."""
     try:
         storage = getattr(study, "_storage", None)
@@ -157,7 +165,13 @@ def _safe_set_trial_user_attr(study: "optuna.study.Study", trial: FrozenTrial, k
 class WarpTpeSampler(CachedTPESampler):
     """CachedTPESampler + embedded BudgetedReductionPolicy (n_jobs=1 intended)."""
 
-    def __init__(self, cfg: WarpTpeConfig, *, policy: Optional[Any] = None) -> None:
+    def __init__(
+        self,
+        cfg: WarpTpeConfig,
+        *,
+        policy: Optional[Any] = None,
+        alpha: Optional[float] = None,
+    ) -> None:
         self.cfg = cfg
 
         # Build reduction function.
@@ -187,10 +201,20 @@ class WarpTpeSampler(CachedTPESampler):
             self._policy = policy
         elif cfg.budget_policy is not None and cfg.budget_policy_enabled:
             # epsilon is configured at the WarpTpeConfig top-level; override any nested value.
+            # alpha is optionally overridden by (highest precedence first):
+            #   1) WarpTpeSampler(alpha=...)
+            #   2) WarpTpeConfig.alpha
+            #   3) BudgetPolicyConfig.alpha
             try:
                 from dataclasses import replace as _dc_replace
 
-                pol_cfg = _dc_replace(cfg.budget_policy, epsilon=float(cfg.epsilon))
+                overrides: dict[str, Any] = {"epsilon": float(cfg.epsilon)}
+                if alpha is not None:
+                    overrides["alpha"] = float(alpha)
+                elif cfg.alpha is not None:
+                    overrides["alpha"] = float(cfg.alpha)
+
+                pol_cfg = _dc_replace(cfg.budget_policy, **overrides)
             except Exception:
                 pol_cfg = cfg.budget_policy
             self._policy = BudgetedReductionPolicy(pol_cfg)
@@ -201,7 +225,13 @@ class WarpTpeSampler(CachedTPESampler):
         self._trial_ctx: Optional[dict[str, Any]] = None
 
         self._last_trial_stats: Optional[Dict[str, Any]] = None
-        self._counts: Dict[str, int] = {"epsilon": 0, "epsilon2": 0, "cached": 0, "refresh": 0, "random": 0}
+        self._counts: Dict[str, int] = {
+            "epsilon": 0,
+            "epsilon2": 0,
+            "cached": 0,
+            "refresh": 0,
+            "random": 0,
+        }
 
         # Optional explicit blackbox time override (seconds) for the *next* observe().
         self._override_blackbox_s: Optional[float] = None
@@ -233,7 +263,10 @@ class WarpTpeSampler(CachedTPESampler):
         try:
             done = study._get_trials(  # type: ignore[attr-defined]
                 deepcopy=False,
-                states=(optuna.trial.TrialState.COMPLETE, optuna.trial.TrialState.PRUNED),
+                states=(
+                    optuna.trial.TrialState.COMPLETE,
+                    optuna.trial.TrialState.PRUNED,
+                ),
                 use_cache=True,
             )
             n_total = int(len(done))
@@ -245,7 +278,9 @@ class WarpTpeSampler(CachedTPESampler):
         decision: Optional[Decision] = None
         if self._policy is not None:
             try:
-                decision = self._policy.decide(n_trials_total=n_total, has_snapshot=bool(has_snapshot))
+                decision = self._policy.decide(
+                    n_trials_total=n_total, has_snapshot=bool(has_snapshot)
+                )
             except Exception:
                 decision = _mk_decision(Action.RANDOM, None, "policy_error")
 
@@ -256,12 +291,16 @@ class WarpTpeSampler(CachedTPESampler):
                 if has_snapshot:
                     self.use_cached_snapshot_once()
                 else:
-                    decision = _mk_decision(Action.REFRESH, decision.reduce_n, "freeze_without_snapshot")
+                    decision = _mk_decision(
+                        Action.REFRESH, decision.reduce_n, "freeze_without_snapshot"
+                    )
             if decision.action == Action.RANDOM:
                 self.use_random_once()
 
             # Budget-driven reduction size: forwarded into reduce_trials() during refresh.
-            st.reduce_n = decision.reduce_n if decision.action == Action.REFRESH else None
+            st.reduce_n = (
+                decision.reduce_n if decision.action == Action.REFRESH else None
+            )
         else:
             st.reduce_n = None
 
@@ -296,7 +335,9 @@ class WarpTpeSampler(CachedTPESampler):
         # CachedTPESampler.after_trial clears TLS flags (random_this_trial/freeze_this_trial).
         # Capture them before delegating.
         st = self._tls_state()
-        if self._trial_ctx is not None and int(self._trial_ctx.get("trial_number", -1)) == int(trial.number):
+        if self._trial_ctx is not None and int(
+            self._trial_ctx.get("trial_number", -1)
+        ) == int(trial.number):
             self._trial_ctx["was_random"] = bool(st.random_this_trial)
             self._trial_ctx["was_freeze"] = bool(st.freeze_this_trial)
             self._trial_ctx["random_source"] = getattr(st, "random_source", None)
@@ -371,7 +412,9 @@ class WarpTpeSampler(CachedTPESampler):
         except Exception:
             return 0.0
 
-    def _finalize_trial_stats(self, study: "optuna.study.Study", trial: FrozenTrial, state: TrialState) -> None:
+    def _finalize_trial_stats(
+        self, study: "optuna.study.Study", trial: FrozenTrial, state: TrialState
+    ) -> None:
         ctx = self._trial_ctx
         self._trial_ctx = None
         if not ctx or int(ctx.get("trial_number", -1)) != int(trial.number):
@@ -388,7 +431,9 @@ class WarpTpeSampler(CachedTPESampler):
         d_split = self._diff_stats(timing_before, timing_after, "split_trials_s")
         d_build = self._diff_stats(timing_before, timing_after, "build_mpe_pairs_s")
         d_draw = self._diff_stats(timing_before, timing_after, "draw_point_s")
-        d_refresh_n = int(self._diff_stats(timing_before, timing_after, "snapshot_refresh_n"))
+        d_refresh_n = int(
+            self._diff_stats(timing_before, timing_after, "snapshot_refresh_n")
+        )
 
         t_fetch_s = max(0.0, d_fetch)
         t_sampler_s = max(0.0, d_reduce + d_split + d_build + d_draw)
@@ -420,15 +465,27 @@ class WarpTpeSampler(CachedTPESampler):
 
         decision: Optional[Decision] = ctx.get("decision")
         startup = bool(ctx.get("startup"))
-        reason = "startup" if startup else (decision.reason if decision is not None else "none")
+        reason = (
+            "startup"
+            if startup
+            else (decision.reason if decision is not None else "none")
+        )
 
-        snapshot_eps2 = bool(getattr(st.snapshot, "eps2_applied", False)) if st.snapshot is not None else False
+        snapshot_eps2 = (
+            bool(getattr(st.snapshot, "eps2_applied", False))
+            if st.snapshot is not None
+            else False
+        )
 
         self._counts["random"] += 1 if eff_action == Action.RANDOM else 0
         self._counts["refresh"] += 1 if d_refresh_n > 0 else 0
         self._counts["cached"] += 1 if eff_action == Action.FREEZE else 0
-        self._counts["epsilon"] += 1 if (eff_action == Action.RANDOM and reason == "epsilon") else 0
-        self._counts["epsilon2"] += 1 if snapshot_eps2 and eff_action != Action.RANDOM else 0
+        self._counts["epsilon"] += (
+            1 if (eff_action == Action.RANDOM and reason == "epsilon") else 0
+        )
+        self._counts["epsilon2"] += (
+            1 if snapshot_eps2 and eff_action != Action.RANDOM else 0
+        )
 
         # Observe for policy.
         if self._policy is not None and decision is not None and not startup:
@@ -476,10 +533,22 @@ class WarpTpeSampler(CachedTPESampler):
             _safe_set_trial_user_attr(study, trial, "warp.action", last["action"])
             _safe_set_trial_user_attr(study, trial, "warp.reason", last["reason"])
             _safe_set_trial_user_attr(study, trial, "warp.reduce_n", last["reduce_n"])
-            _safe_set_trial_user_attr(study, trial, "warp.t_blackbox_s", float(last["t_blackbox_s"]))
-            _safe_set_trial_user_attr(study, trial, "warp.t_fetch_s", float(last["t_fetch_s"]))
-            _safe_set_trial_user_attr(study, trial, "warp.t_sampler_s", float(last["t_sampler_s"]))
-            _safe_set_trial_user_attr(study, trial, "warp.eps2_active", bool(last["eps2_active"]))
+            _safe_set_trial_user_attr(
+                study, trial, "warp.t_blackbox_s", float(last["t_blackbox_s"])
+            )
+            _safe_set_trial_user_attr(
+                study, trial, "warp.t_fetch_s", float(last["t_fetch_s"])
+            )
+            _safe_set_trial_user_attr(
+                study, trial, "warp.t_sampler_s", float(last["t_sampler_s"])
+            )
+            _safe_set_trial_user_attr(
+                study, trial, "warp.eps2_active", bool(last["eps2_active"])
+            )
             if self.cfg.trial_attrs == "full":
-                _safe_set_trial_user_attr(study, trial, "warp.n_trials_total", int(last["n_trials_total"]))
-                _safe_set_trial_user_attr(study, trial, "warp.n_trials_used", int(last["n_trials_used"]))
+                _safe_set_trial_user_attr(
+                    study, trial, "warp.n_trials_total", int(last["n_trials_total"])
+                )
+                _safe_set_trial_user_attr(
+                    study, trial, "warp.n_trials_used", int(last["n_trials_used"])
+                )

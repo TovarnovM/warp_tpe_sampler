@@ -197,3 +197,47 @@ def test_warp_tpe_config_epsilon_overrides_budget_policy_epsilon() -> None:
 
     counts = sampler.get_action_counts()
     assert counts["epsilon"] >= 1
+
+
+def test_warp_tpe_config_alpha_overrides_budget_policy_alpha() -> None:
+    """WarpTpeConfig.alpha must override BudgetPolicyConfig.alpha when policy is embedded."""
+
+    optuna = pytest.importorskip("optuna")
+
+    from warp_tpe_sampler import BudgetPolicyConfig
+    from warp_tpe_sampler import WarpTpeConfig, WarpTpeSampler
+
+    cfg = WarpTpeConfig(
+        n_startup_trials=0,
+        seed=0,
+        trial_attrs="none",
+        alpha=0.10,
+        budget_policy=BudgetPolicyConfig(alpha=0.33, warmup_steps=0, seed=0),
+        budget_policy_enabled=True,
+    )
+
+    sampler = WarpTpeSampler(cfg)
+    assert sampler._policy is not None
+    assert sampler._policy.cfg.alpha == pytest.approx(0.10)
+
+
+def test_warp_tpe_sampler_alpha_param_overrides_warp_tpe_config_alpha() -> None:
+    """WarpTpeSampler(alpha=...) must have highest precedence."""
+
+    pytest.importorskip("optuna")
+
+    from warp_tpe_sampler import BudgetPolicyConfig
+    from warp_tpe_sampler import WarpTpeConfig, WarpTpeSampler
+
+    cfg = WarpTpeConfig(
+        n_startup_trials=0,
+        seed=0,
+        trial_attrs="none",
+        alpha=0.20,
+        budget_policy=BudgetPolicyConfig(alpha=0.33, warmup_steps=0, seed=0),
+        budget_policy_enabled=True,
+    )
+
+    sampler = WarpTpeSampler(cfg, alpha=0.05)
+    assert sampler._policy is not None
+    assert sampler._policy.cfg.alpha == pytest.approx(0.05)

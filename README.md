@@ -56,16 +56,16 @@ study.optimize(objective, n_trials=200)
 
 ```python
 import optuna
-from warp_tpe_sampler import WarpTpeSampler, WarpTpeConfig
-from warp_tpe_sampler.pbt_funcs.budget_policy import BudgetPolicyConfig
+from warp_tpe_sampler import BudgetPolicyConfig, WarpTpeConfig, WarpTpeSampler
 
 budget = BudgetPolicyConfig(
-    warmup_trials=5,
     warmup_steps=5,
     safety=0.9,
-    beta=0.25,
-    ema_halflife=16,
+    alpha=0.20,
+    ema_halflife_s=16.0,
     max_bank_s=30.0,
+    t_min_s=0.01,
+    t_max_s=30.0,
     n_min=16,
     n_max=512,
     epsilon=0.05,
@@ -89,6 +89,7 @@ cfg = WarpTpeConfig(
 
     # Exploration & diversification
     epsilon=0.05,   # overrides budget_policy.epsilon
+    alpha=0.25,     # overrides budget_policy.alpha
     epsilon2=0.02,  # “below2” diversification
 
     # Optional trial annotations
@@ -324,7 +325,8 @@ Sampler overhead can be significant when:
 
 ### Exploration and diversification
 
-* `epsilon: float` (policy-level exploration; overrides nested policy epsilon)
+* `epsilon: float` (policy-level exploration; overrides `budget_policy.epsilon`)
+* `alpha: float | None` (optional; overrides `budget_policy.alpha`)
 * `epsilon2: float` (passed down to `CachedTPESampler` as “below2” probability)
 
 ### Budget policy integration
@@ -366,146 +368,110 @@ WarpTpeSampler typically disables internal `CachedTPESampler(epsilon=...)` to ke
 
 ---
 
+
 # Budget Policy (`BudgetPolicyConfig` + `BudgetedReductionPolicy`)
 
-## Overview
+`WarpTpeSampler` can embed a lightweight *time-budget controller* that decides, per trial, whether to:
 
-The policy maintains a **time bank** (seconds), updated once per completed trial.
+* `RUN` — rebuild (or reuse) the cached TPE snapshot normally and sample via TPE.
+* `FREEZE` — reuse the previous cached snapshot for this trial (avoids expensive refresh).
+* `REDUCE` — refresh the cached snapshot, but keep only `N` finished trials.
+* `RANDOM` — force random sampling for the whole trial.
 
-Definitions:
+The policy is intentionally minimal. It does **not** attempt to model Optuna's internal costs in detail; instead it uses a *time bank* with two decision thresholds.
 
-* `T_bb` = black-box evaluation time (seconds)
-* `T_ov` = sampler overhead time (seconds)
+## Time bank model
 
-  * typically `T_fetch + T_sampler`
+You can feed the policy with the measured black-box runtime via `WarpTpeSampler.set_last_blackbox_time_s(t)`.
 
-### Effective black-box time floor
+Let:
 
-To avoid instability for very fast objectives:
+* $t_{bb}$ be the measured black-box runtime of the last completed trial (seconds).
+* $t_{bb,eff} = \max(t_{bb}, t_{min})$ be the effective runtime floor.
+* $\alpha \in (0,1)$ be the feedback parameter and $\beta = \frac{\alpha}{1-\alpha}$.
+* $b$ be the internal bank (seconds), clipped to $[0, \text{max\_bank\_s}]$.
 
-* `T_bb_eff = max(T_bb, t_min_sec)`
+The policy maintains an EMA $\hat{t}_{bb}$ of $t_{bb,eff}$ using a wall-clock half-life:
 
----
+$$
+\text{decay} = 0.5^{\Delta t / \text{ema\_halflife\_s}}, \qquad
+\hat{t}_{bb} \leftarrow \text{decay}\,\hat{t}_{bb} + (1-\text{decay})\,t_{bb,eff}
+$$
 
-## Bank update equation
+For the *next* decision, the policy uses a conservative benchmark prediction:
 
-Income is proportional to black-box time:
+$$
+t_{bench} = \text{safety} \cdot \hat{t}_{bb}
+$$
 
-* `income = beta * T_bb_eff`
+The *available budget* is:
 
-Spending is measured overhead:
+$$
+\text{available} = \max(0, b + \beta\, t_{bench})
+$$
 
-* `spend = T_fetch + T_sampler`
+After an action is chosen, the policy records a predicted time for that action $t_{pred}$. It then updates the bank:
 
-Bank update:
+$$
+\text{overhead} = \max(0, t_{bench} - t_{pred})
+$$
 
-* `bank_next = clip(bank + income - spend, -max_bank_s, +max_bank_s)`
+$$
+b \leftarrow \operatorname{clip}_{[0,\text{max\_bank\_s}]}\bigl(b + \beta\, t_{bb,eff} - \text{overhead}\bigr)
+$$
 
 Interpretation:
 
-* `beta` controls the target overhead fraction (e.g., `beta=0.25` targets about 25% overhead vs black-box time).
-* `max_bank_s` bounds accumulated credit/debt.
+* $\beta\,t_{bb,eff}$ is an income term proportional to how long the objective took.
+* $\text{overhead}$ charges the policy for choosing actions predicted to be faster than the benchmark. This makes the bank represent slack *relative to the benchmark*, rather than raw wall time.
 
----
+## Decision logic
 
-## Available budget for the next decision
+Let `available` be computed as above, and let $t_{min}$ / $t_{max}$ be thresholds in seconds.
 
-The policy predicts next-step income using an EMA of `T_bb_eff`:
+1. Warmup
+   * if `total_steps < warmup_steps` → `RUN`.
 
-* `T_hat = EMA(T_bb_eff)`
+2. Threshold-based action
+   * if `available >= t_max` → `RUN`.
+   * else if `available >= t_min` → `FREEZE`.
+   * else → `REDUCE` if `n_keep > n_min`, otherwise `RANDOM`.
 
-Then:
+   For `REDUCE`, the policy outputs:
 
-* `available = max(0, bank + beta * T_hat)`
-* `available_safe = safety * available`
+   $$
+   n_{used} = \operatorname{clip}_{[n_{min}, n_{max}]}(n_{keep})
+   $$
 
-`safety` is a margin factor in `(0, 1)`.
-
----
-
-## Prediction model for overhead
-
-The policy maintains EMA estimates for per-unit costs:
-
-* `fetch_per_trial ≈ EMA(T_fetch / n_total)`
-* `refresh_per_trial ≈ EMA(T_refresh / n_used)`
-* `freeze_cost ≈ EMA(T_freeze)`
-
-Predicted costs:
-
-* `T_fetch_hat(n_total) = fetch_per_trial * n_total`
-* `T_refresh_hat(n_used) = refresh_per_trial * n_used`
-* `T_freeze_hat = freeze_cost`
-
-`ema_halflife` controls smoothing.
-
----
-
-## Decision logic (high-level)
-
-Given:
-
-* `n_total = number of finished trials`
-* `has_snapshot = whether a cached snapshot exists`
-
-The policy selects an action using this high-level structure:
-
-1. Exploration (epsilon-greedy)
-
-   * with probability `epsilon` → `RANDOM`
-
-2. Startup / warmup
-
-   * if `n_total < warmup_trials` → `RANDOM`
-   * else if `warmup_steps > 0` and still warming up → `REFRESH(full)`
-
-3. Prefer full refresh if it fits
-
-   * if `T_fetch_hat(n_total) + T_refresh_hat(n_total) <= available_safe` → `REFRESH(full)`
-
-4. Otherwise, try reduced refresh
-
-   * compute maximum feasible `n_maxfit`:
-
-     * `n_maxfit = floor((available_safe - T_fetch_hat(n_total)) / refresh_per_trial)`
-   * clamp:
-
-     * `n_used = clamp(n_maxfit, n_min, n_max)`
-   * if feasible → `REFRESH(reduce_n=n_used)`
-
-5. Otherwise, freeze if affordable
-
-   * if `has_snapshot` and `freeze_streak < max_freeze_streak` and `T_freeze_hat <= available_safe` → `FREEZE`
-
-6. Fallback
-
-   * `RANDOM`
-
----
+3. Exploration (epsilon-greedy)
+   * with probability `epsilon` → override the chosen action with `RANDOM`.
 
 ## Policy configuration reference (`BudgetPolicyConfig`)
 
-* `warmup_trials: int` — minimum finished trials before the policy may use non-random decisions.
-* `warmup_steps: int` — number of forced refresh steps after warmup.
-* `randomize_every: int` — force `RANDOM` every K steps (optional).
-* `enforce_randomize_when_snapshot: bool` — optional forcing behavior when a snapshot exists.
-* `safety: float` — safety margin multiplier `< 1`.
-* `beta: float` — income fraction: overhead budget per unit black-box time.
-* `max_bank_s: float` — bank clamp.
-* `ema_halflife: int` — EMA responsiveness.
-* `max_freeze_streak: int` — cap on consecutive FREEZE actions.
-* `n_min: int`, `n_max: int` — bounds for reduced refresh size (`reduce_n`).
-* `epsilon: float` — exploration probability.
-* `seed: int | None` — policy RNG seed.
-* `t_min_sec: float` — floor for effective black-box time.
+* `warmup_steps: int` — number of initial decisions forced to `RUN`.
+* `safety: float` — conservative multiplier for the benchmark prediction in $(0,1]$.
+* `alpha: float` — feedback parameter in $(0,1)$ controlling $\beta = \frac{\alpha}{1-\alpha}$.
+* `ema_halflife_s: float` — half-life (seconds) for the EMA of black-box runtime.
+* `max_bank_s: float` — clip limit for the time bank (seconds).
+* `t_min_s: float` — threshold (seconds) below which the policy must `REDUCE` or `RANDOM`.
+* `t_max_s: float` — threshold (seconds) above which the policy can safely `RUN`.
+* `n_min: int`, `n_max: int` — bounds for the `reduce_n` produced by `REDUCE`.
+* `epsilon: float` — epsilon-greedy override probability.
+* `seed: int | None` — RNG seed for epsilon-greedy decisions.
 
----
+### Where to set `alpha` and `epsilon`
+
+If you embed the policy via `WarpTpeSampler` / `WarpTpeConfig`, you can override two parameters at the top level:
+
+* `WarpTpeConfig.epsilon` (always overrides `budget_policy.epsilon`)
+* `WarpTpeConfig.alpha` (if set, overrides `budget_policy.alpha`)
+* `WarpTpeSampler(alpha=...)` (highest priority override; beats both config levels)
 
 ## Introspection API (WarpTpeSampler)
 
-* `set_last_blackbox_time_s(t: float)` — provide measured black-box runtime (seconds) for policy updates.
-* `get_last_trial_stats() -> dict | None` — returns last recorded action/stats snapshot (depends on `trial_attrs`).
-* `get_action_counts() -> dict[str, int]` — counts of actions/events (refresh/freeze/random/epsilon/epsilon2 etc.).
+* `set_last_blackbox_time_s(t: float)` — provide the measured black-box runtime (seconds).
+* `get_last_trial_stats() -> dict | None` — returns the last recorded decision/telemetry snapshot.
+* `get_action_counts() -> dict[str, int]` — counts of actions/events (freeze/reduce/random/epsilon/epsilon2 etc.).
 
 ---
 

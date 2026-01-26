@@ -94,6 +94,10 @@ class BudgetPolicyConfig:
     def validate(self) -> None:
         if not (0.0 <= self.epsilon <= 1.0):
             raise ValueError("epsilon must be in [0,1]")
+        # alpha controls the feedback gain: beta = alpha / (1 - alpha).
+        # It must be strictly within (0, 1) to avoid a negative/undefined gain.
+        if not (0.0 < self.alpha < 1.0):
+            raise ValueError("alpha must be in (0,1)")
         if self.t_min_sec <= 0:
             raise ValueError("t_min_sec must be > 0")
         if self.n_min <= 0:
@@ -173,17 +177,31 @@ class BudgetedReductionPolicy:
 
         # 1) epsilon
         if self._rng.random() < cfg.epsilon:
-            return self._mk(Action.RANDOM, None, "epsilon", (), available, bb_pred, 0.0, 0.0, 0.0)
+            return self._mk(
+                Action.RANDOM, None, "epsilon", (), available, bb_pred, 0.0, 0.0, 0.0
+            )
 
         n_total = int(max(0, n_trials_total))
         if n_total <= 0:
-            return self._mk(Action.RANDOM, None, "no_trials", ("NO_TRIALS",), available, bb_pred, 0.0, 0.0, 0.0)
+            return self._mk(
+                Action.RANDOM,
+                None,
+                "no_trials",
+                ("NO_TRIALS",),
+                available,
+                bb_pred,
+                0.0,
+                0.0,
+                0.0,
+            )
 
         # warmup: force REFRESH to learn slopes
         if st.step <= cfg.warmup_steps:
             pf = self._pred_fetch_s(n_total)
             ps = self._pred_refresh_s(n_total)
-            return self._mk(Action.REFRESH, None, "warmup", (), available, bb_pred, pf + ps, pf, ps)
+            return self._mk(
+                Action.REFRESH, None, "warmup", (), available, bb_pred, pf + ps, pf, ps
+            )
 
         safety = cfg.safety
         alerts: list[str] = []
@@ -196,24 +214,70 @@ class BudgetedReductionPolicy:
         ps_full = self._pred_refresh_s(n_total)
         p_full = pf + ps_full
         if p_full <= safety * available:
-            return self._mk(Action.REFRESH, None, "refresh_full", tuple(alerts), available, bb_pred, p_full, pf, ps_full)
+            return self._mk(
+                Action.REFRESH,
+                None,
+                "refresh_full",
+                tuple(alerts),
+                available,
+                bb_pred,
+                p_full,
+                pf,
+                ps_full,
+            )
 
         # 3) REFRESH reduced (largest feasible N)
-        n_used = self._max_n_used(n_total=n_total, available_s=available, pred_fetch_s=pf, safety=safety)
+        n_used = self._max_n_used(
+            n_total=n_total, available_s=available, pred_fetch_s=pf, safety=safety
+        )
         if n_used is not None:
             ps = self._pred_refresh_s(n_used)
             p = pf + ps
-            return self._mk(Action.REFRESH, n_used, "refresh_reduced", tuple(alerts), available, bb_pred, p, pf, ps)
+            return self._mk(
+                Action.REFRESH,
+                n_used,
+                "refresh_reduced",
+                tuple(alerts),
+                available,
+                bb_pred,
+                p,
+                pf,
+                ps,
+            )
 
         # 4) FREEZE
         if has_snapshot and st.freeze_streak < cfg.max_freeze_streak:
             ps_fz = self._pred_freeze_s()
             if ps_fz <= safety * available:
-                return self._mk(Action.FREEZE, None, "freeze", tuple(alerts), available, bb_pred, ps_fz, 0.0, ps_fz)
+                return self._mk(
+                    Action.FREEZE,
+                    None,
+                    "freeze",
+                    tuple(alerts),
+                    available,
+                    bb_pred,
+                    ps_fz,
+                    0.0,
+                    ps_fz,
+                )
 
         # 5) RANDOM fallback
-        extra = ("FREEZE_STREAK_LIMIT",) if (has_snapshot and st.freeze_streak >= cfg.max_freeze_streak) else ()
-        return self._mk(Action.RANDOM, None, "budget_fallback", tuple(alerts) + extra, available, bb_pred, 0.0, 0.0, 0.0)
+        extra = (
+            ("FREEZE_STREAK_LIMIT",)
+            if (has_snapshot and st.freeze_streak >= cfg.max_freeze_streak)
+            else ()
+        )
+        return self._mk(
+            Action.RANDOM,
+            None,
+            "budget_fallback",
+            tuple(alerts) + extra,
+            available,
+            bb_pred,
+            0.0,
+            0.0,
+            0.0,
+        )
 
     def observe(self, obs: Observation) -> None:
         cfg = self.cfg
@@ -252,11 +316,16 @@ class BudgetedReductionPolicy:
 
     def _pred_bb_eff_s(self) -> float:
         v = self.state.bb_ema_s
-        return max(self.cfg.t_min_sec, float(v) if (v is not None and math.isfinite(v)) else self.cfg.t_min_sec)
+        return max(
+            self.cfg.t_min_sec,
+            float(v) if (v is not None and math.isfinite(v)) else self.cfg.t_min_sec,
+        )
 
     def _available_budget_s(self) -> float:
         # current spendable overhead for the next step
-        return max(0.0, float(self.state.bank_s) + self.cfg.beta * self._pred_bb_eff_s())
+        return max(
+            0.0, float(self.state.bank_s) + self.cfg.beta * self._pred_bb_eff_s()
+        )
 
     def _pred_fetch_s(self, n_total: int) -> float:
         per = self.state.fetch_per_trial_ema_s
@@ -276,7 +345,9 @@ class BudgetedReductionPolicy:
             return 1e-4
         return float(v)
 
-    def _max_n_used(self, *, n_total: int, available_s: float, pred_fetch_s: float, safety: float) -> Optional[int]:
+    def _max_n_used(
+        self, *, n_total: int, available_s: float, pred_fetch_s: float, safety: float
+    ) -> Optional[int]:
         cfg = self.cfg
         per = self.state.refresh_per_trial_ema_s
         if per is None or not math.isfinite(per) or per <= 0:
@@ -303,8 +374,17 @@ class BudgetedReductionPolicy:
             setattr(st, field, float(old) * (1.0 - w) + float(value) * w)
 
     @staticmethod
-    def _mk(action: Action, reduce_n: Optional[int], reason: str, alerts: Tuple[str, ...],
-            available: float, bb: float, po: float, pf: float, ps: float) -> Decision:
+    def _mk(
+        action: Action,
+        reduce_n: Optional[int],
+        reason: str,
+        alerts: Tuple[str, ...],
+        available: float,
+        bb: float,
+        po: float,
+        pf: float,
+        ps: float,
+    ) -> Decision:
         return Decision(
             action=action,
             reduce_n=reduce_n,
@@ -322,6 +402,7 @@ class BudgetedReductionPolicy:
 # ------------------------------
 # Simulation / benchmark
 # ------------------------------
+
 
 def _poisson(lam: float, rng: random.Random) -> int:
     if lam <= 0:
@@ -359,36 +440,53 @@ def _bench() -> None:
         return [
             Scenario(
                 name="fast_fetch",
-                fetch_a=0.002, fetch_b=2e-7, fetch_p=1.0,
+                fetch_a=0.002,
+                fetch_b=2e-7,
+                fetch_p=1.0,
                 refresh_c=8e-7,
                 freeze_cost=2e-4,
-                bb_base=0.30, bb_jitter=0.05,
-                repeat_prob=0.05, repeat_mult=2.5,
+                bb_base=0.30,
+                bb_jitter=0.05,
+                repeat_prob=0.05,
+                repeat_mult=2.5,
             ),
             Scenario(
                 name="slow_fetch",
-                fetch_a=0.005, fetch_b=8e-7, fetch_p=1.0,
+                fetch_a=0.005,
+                fetch_b=8e-7,
+                fetch_p=1.0,
                 refresh_c=8e-7,
                 freeze_cost=2e-4,
-                bb_base=0.30, bb_jitter=0.05,
-                repeat_prob=0.05, repeat_mult=2.5,
+                bb_base=0.30,
+                bb_jitter=0.05,
+                repeat_prob=0.05,
+                repeat_mult=2.5,
             ),
             Scenario(
                 name="bursty_fetch",
-                fetch_a=0.002, fetch_b=2e-7, fetch_p=1.0,
+                fetch_a=0.002,
+                fetch_b=2e-7,
+                fetch_p=1.0,
                 refresh_c=8e-7,
                 freeze_cost=2e-4,
-                bb_base=0.30, bb_jitter=0.05,
-                repeat_prob=0.05, repeat_mult=2.5,
-                burst_prob=0.02, burst_mult=25.0,
+                bb_base=0.30,
+                bb_jitter=0.05,
+                repeat_prob=0.05,
+                repeat_mult=2.5,
+                burst_prob=0.02,
+                burst_mult=25.0,
             ),
             Scenario(
                 name="very_fast_blackbox",
-                fetch_a=0.002, fetch_b=2e-7, fetch_p=1.0,
+                fetch_a=0.002,
+                fetch_b=2e-7,
+                fetch_p=1.0,
                 refresh_c=8e-7,
                 freeze_cost=2e-4,
-                bb_base=0.03, bb_jitter=0.01,
-                repeat_prob=0.02, repeat_mult=2.0,
+                bb_base=0.03,
+                bb_jitter=0.01,
+                repeat_prob=0.02,
+                repeat_mult=2.0,
             ),
         ]
 
@@ -400,7 +498,11 @@ def _bench() -> None:
         return max(0.0, t)
 
     def bb_time(s: Scenario, step: int, rng: random.Random) -> float:
-        t = s.bb_base + s.bb_jitter * math.sin(step / 17.0) + 0.01 * (rng.random() - 0.5)
+        t = (
+            s.bb_base
+            + s.bb_jitter * math.sin(step / 17.0)
+            + 0.01 * (rng.random() - 0.5)
+        )
         t = max(0.0, t)
         if rng.random() < s.repeat_prob:
             t *= s.repeat_mult
@@ -511,13 +613,15 @@ def _bench() -> None:
             total_bb += bb_eff
 
             w_over += overhead
-            w_tot += (bb_eff + overhead)
+            w_tot += bb_eff + overhead
             if (step + 1) % args.window == 0:
                 w_alphas.append((w_over / w_tot) if w_tot > 0 else 0.0)
                 w_over = 0.0
                 w_tot = 0.0
 
-        achieved = total_over / (total_bb + total_over) if (total_bb + total_over) > 0 else 0.0
+        achieved = (
+            total_over / (total_bb + total_over) if (total_bb + total_over) > 0 else 0.0
+        )
         avg_reduce = (reduce_sum / reduce_cnt) if reduce_cnt else 0.0
 
         p95 = 0.0

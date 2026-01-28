@@ -199,45 +199,79 @@ def test_warp_tpe_config_epsilon_overrides_budget_policy_epsilon() -> None:
     assert counts["epsilon"] >= 1
 
 
-def test_warp_tpe_config_alpha_overrides_budget_policy_alpha() -> None:
-    """WarpTpeConfig.alpha must override BudgetPolicyConfig.alpha when policy is embedded."""
-
+def test_custom_trial_user_attrs_fn_can_set_user_attrs_even_when_trial_attrs_disabled() -> (
+    None
+):
     optuna = pytest.importorskip("optuna")
-
-    from warp_tpe_sampler import BudgetPolicyConfig
     from warp_tpe_sampler import WarpTpeConfig, WarpTpeSampler
 
+    calls: list[int] = []
+
+    def writer(*, trial, study, sampler, set_user_attr, **kwargs):  # noqa: ANN001
+        calls.append(trial.number)
+        # Demonstrate writing trial user attrs from the sampler side.
+        set_user_attr("custom.called", True)
+        set_user_attr("custom.trial_number", trial.number)
+
     cfg = WarpTpeConfig(
+        trial_attrs="none",
+        budget_policy_enabled=False,
         n_startup_trials=0,
         seed=0,
-        trial_attrs="none",
-        alpha=0.10,
-        budget_policy=BudgetPolicyConfig(alpha=0.33, warmup_steps=0, seed=0),
-        budget_policy_enabled=True,
+        multivariate=False,
+        group=False,
+        constant_liar=False,
     )
+    sampler = WarpTpeSampler(cfg, trial_user_attrs_fn=writer)
+    study = optuna.create_study(direction="minimize", sampler=sampler)
 
-    sampler = WarpTpeSampler(cfg)
-    assert sampler._policy is not None
-    assert sampler._policy.cfg.alpha == pytest.approx(0.10)
+    def objective(trial):  # noqa: ANN001
+        return float(trial.suggest_float("x", 0.0, 1.0))
+
+    n_trials = 5
+    study.optimize(objective, n_trials=n_trials, n_jobs=1)
+
+    assert calls == list(range(n_trials))
+    for t in study.trials:
+        assert t.user_attrs.get("custom.called") is True
+        assert t.user_attrs.get("custom.trial_number") == t.number
+        # Built-in annotations should be absent in this mode.
+        assert "warp.action" not in t.user_attrs
 
 
-def test_warp_tpe_sampler_alpha_param_overrides_warp_tpe_config_alpha() -> None:
-    """WarpTpeSampler(alpha=...) must have highest precedence."""
-
-    pytest.importorskip("optuna")
-
-    from warp_tpe_sampler import BudgetPolicyConfig
+def test_custom_trial_user_attrs_fn_constructor_overrides_cfg() -> None:
+    optuna = pytest.importorskip("optuna")
     from warp_tpe_sampler import WarpTpeConfig, WarpTpeSampler
 
+    called_cfg: list[int] = []
+    called_arg: list[int] = []
+
+    def writer_cfg(*, trial, set_user_attr, **kwargs):  # noqa: ANN001
+        called_cfg.append(trial.number)
+        set_user_attr("custom.override", 1)
+
+    def writer_arg(*, trial, set_user_attr, **kwargs):  # noqa: ANN001
+        called_arg.append(trial.number)
+        set_user_attr("custom.override", 2)
+
     cfg = WarpTpeConfig(
+        trial_attrs="none",
+        trial_user_attrs_fn=writer_cfg,
+        budget_policy_enabled=False,
         n_startup_trials=0,
         seed=0,
-        trial_attrs="none",
-        alpha=0.20,
-        budget_policy=BudgetPolicyConfig(alpha=0.33, warmup_steps=0, seed=0),
-        budget_policy_enabled=True,
+        multivariate=False,
+        group=False,
+        constant_liar=False,
     )
+    sampler = WarpTpeSampler(cfg, trial_user_attrs_fn=writer_arg)
+    study = optuna.create_study(direction="minimize", sampler=sampler)
 
-    sampler = WarpTpeSampler(cfg, alpha=0.05)
-    assert sampler._policy is not None
-    assert sampler._policy.cfg.alpha == pytest.approx(0.05)
+    def objective(trial):  # noqa: ANN001
+        return float(trial.suggest_float("x", 0.0, 1.0))
+
+    study.optimize(objective, n_trials=1, n_jobs=1)
+
+    assert called_cfg == []
+    assert called_arg == [0]
+    assert study.trials[0].user_attrs.get("custom.override") == 2

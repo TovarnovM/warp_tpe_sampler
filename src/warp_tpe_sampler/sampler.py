@@ -15,10 +15,10 @@ Design constraints
   forwarded into reduce_trials().
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import time
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Callable, Dict, Literal, Optional
 
 try:
     import optuna
@@ -112,9 +112,6 @@ class WarpTpeConfig:
     # epsilon-greedy probability to force RANDOM via the embedded budget policy.
     # (Promoted from BudgetPolicyConfig to avoid nested config churn.)
     epsilon: float = 0.05
-
-    # Optional override for BudgetPolicyConfig.alpha.
-    # If set, it is applied when constructing the embedded BudgetedReductionPolicy.
     alpha: Optional[float] = None
 
     epsilon2: float = 0.0
@@ -130,6 +127,7 @@ class WarpTpeConfig:
 
     # --- telemetry persistence to trial.user_attrs ---
     trial_attrs: TrialAttrsMode = "basic"
+    trial_user_attrs_fn: Optional[Callable[..., None]] = None
 
 
 def _mk_decision(action: Action, reduce_n: Optional[int], reason: str) -> Decision:
@@ -169,10 +167,20 @@ class WarpTpeSampler(CachedTPESampler):
         self,
         cfg: WarpTpeConfig,
         *,
-        policy: Optional[Any] = None,
+        policy: Optional[BudgetedReductionPolicy] = None,
         alpha: Optional[float] = None,
+        trial_user_attrs_fn: Optional[Callable[..., None]] = None,
     ) -> None:
         self.cfg = cfg
+        self._trial_user_attrs_fn = (
+            trial_user_attrs_fn
+            if trial_user_attrs_fn is not None
+            else cfg.trial_user_attrs_fn
+        )
+        if self._trial_user_attrs_fn is not None and not callable(
+            self._trial_user_attrs_fn
+        ):
+            raise TypeError("trial_user_attrs_fn must be callable or None")
 
         # Build reduction function.
         reduce_trials = self._make_reduce_trials(cfg)
@@ -201,22 +209,11 @@ class WarpTpeSampler(CachedTPESampler):
             self._policy = policy
         elif cfg.budget_policy is not None and cfg.budget_policy_enabled:
             # epsilon is configured at the WarpTpeConfig top-level; override any nested value.
-            # alpha is optionally overridden by (highest precedence first):
-            #   1) WarpTpeSampler(alpha=...)
-            #   2) WarpTpeConfig.alpha
-            #   3) BudgetPolicyConfig.alpha
-            try:
-                from dataclasses import replace as _dc_replace
-
-                overrides: dict[str, Any] = {"epsilon": float(cfg.epsilon)}
-                if alpha is not None:
-                    overrides["alpha"] = float(alpha)
-                elif cfg.alpha is not None:
-                    overrides["alpha"] = float(cfg.alpha)
-
-                pol_cfg = _dc_replace(cfg.budget_policy, **overrides)
-            except Exception:
-                pol_cfg = cfg.budget_policy
+            pol_cfg = replace(cfg.budget_policy, epsilon=float(cfg.epsilon))
+            if cfg.alpha is not None:
+                pol_cfg = replace(pol_cfg, alpha=float(cfg.alpha))
+            if alpha is not None:
+                pol_cfg = replace(pol_cfg, alpha=float(alpha))
             self._policy = BudgetedReductionPolicy(pol_cfg)
         else:
             self._policy = None
@@ -552,3 +549,29 @@ class WarpTpeSampler(CachedTPESampler):
                 _safe_set_trial_user_attr(
                     study, trial, "warp.n_trials_used", int(last["n_trials_used"])
                 )
+
+        # Optional user hook to set trial user attrs.
+        #
+        # This is executed regardless of `trial_attrs` mode, and any exceptions are swallowed
+        # to avoid breaking optimization runs.
+        if self._trial_user_attrs_fn is not None:
+
+            def _set_user_attr(key: str, value: Any) -> None:
+                _safe_set_trial_user_attr(study, trial, key, value)
+
+            try:
+                self._trial_user_attrs_fn(
+                    trial=trial,
+                    study=study,
+                    sampler=self,
+                    cfg=self.cfg,
+                    decision=decision,
+                    action=eff_action,
+                    reason=reason,
+                    last_trial_stats=dict(last),
+                    ctx=dict(ctx),
+                    state=state,
+                    set_user_attr=_set_user_attr,
+                )
+            except Exception:  # noqa: BLE001
+                pass

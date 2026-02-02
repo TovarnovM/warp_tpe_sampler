@@ -46,25 +46,32 @@ ReduceKind = Literal["last_n", "tail_plus_random"]
 
 def _gamma_from_cfg(cfg: "WarpTpeConfig"):
     """Return Optuna-compatible gamma(n) callable based on cfg.gamma_mode."""
+    frac = float(cfg.gamma_frac)
+    cap = int(cfg.gamma_cap)
 
     def _default_gamma(n: int) -> int:
-        return min(int(0.1 * n) + 1, 25)
+        return min(int(0.1 * n) + 1, cap)
 
     def _hyperopt_gamma(n: int) -> int:
-        return min(int(0.25 * math.sqrt(max(n, 1))) + 1, 25)
+        return min(int(0.25 * math.sqrt(max(n, 1))) + 1, cap)
 
     if cfg.gamma_mode == "default":
         return _default_gamma
     if cfg.gamma_mode == "hyperopt":
         return _hyperopt_gamma
 
-    frac = float(cfg.gamma_frac)
-    cap = int(cfg.gamma_cap)
+    if cap > 0:
 
-    def _gamma(n: int) -> int:
-        return max(1, min(cap, int(math.ceil(frac * max(n, 1)))))
+        def _gamma(n: int) -> int:
+            return max(1, min(cap, int(math.ceil(frac * max(n, 1)))))
 
-    return _gamma
+        return _gamma
+    if cap < 0:
+
+        def _gamma(n: int) -> int:
+            return max(1, int(math.ceil(frac * max(n, 1))))
+
+        return _gamma
 
 
 def _weights_from_cfg(cfg: "WarpTpeConfig"):

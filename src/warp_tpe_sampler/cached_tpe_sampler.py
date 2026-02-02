@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import copy
 import threading
 import time
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
@@ -179,6 +180,15 @@ class CachedTPESampler(_OptunaTPESampler):
         epsilon2: float = 0.0,
         **kwargs: Any,
     ) -> None:
+        # Persist init args for clone().
+        # NOTE: we intentionally store the *user-provided* reduce_trials (which may be None)
+        # rather than the resolved default, to preserve the same construction semantics.
+        self._init_args: tuple[Any, ...] = tuple(args)
+        self._init_kwargs: dict[str, Any] = dict(kwargs)
+        self._init_reduce_trials: Optional[ReduceTrialsFunc] = reduce_trials
+        self._init_epsilon: float = float(epsilon)
+        self._init_epsilon2: float = float(epsilon2)
+
         super().__init__(*args, **kwargs)
         self._reduce_trials: ReduceTrialsFunc = reduce_trials or _default_reduce_trials
 
@@ -197,6 +207,40 @@ class CachedTPESampler(_OptunaTPESampler):
         # Aggregated timings across threads (for benchmarks with n_jobs>1)
         self._agg_lock = threading.Lock()
         self._agg_timing = TimingStats()
+
+    # ---------------- cloning / reseeding ----------------
+    def clone(self) -> "CachedTPESampler":
+        """Create a fresh sampler instance with identical configuration.
+
+        This method is intended for per-thread (or per-worker) isolation wrappers.
+        The returned sampler does **not** share thread-local caches, locks, or RNG state.
+        """
+
+        # Best-effort deep copy of kwargs to avoid accidental sharing of nested mutable
+        # objects (rare but possible with custom gamma/weights callables holding state).
+        # If deepcopy fails, fall back to a shallow copy.
+        try:
+            kwargs = copy.deepcopy(self._init_kwargs)
+        except Exception:
+            kwargs = dict(self._init_kwargs)
+
+        return CachedTPESampler(
+            *self._init_args,
+            reduce_trials=self._init_reduce_trials,
+            epsilon=float(self._init_epsilon),
+            epsilon2=float(self._init_epsilon2),
+            **kwargs,
+        )
+
+    def reseed_rng(self) -> None:
+        """Reseed the internal RNG.
+
+        Optuna calls ``reseed_rng`` when running ``Study.optimize(n_jobs>1)``.
+        CachedTPESampler inherits Optuna's TPE reseeding logic; we override it
+        explicitly so wrappers can reliably call it.
+        """
+
+        super().reseed_rng()
 
     # ---------------- TLS ----------------
     def _tls_state(self) -> _TLSState:

@@ -16,8 +16,10 @@ Design constraints
 """
 
 from dataclasses import dataclass, replace
+import copy
 import math
 import time
+import threading
 from typing import Any, Callable, Dict, Literal, Optional
 
 try:
@@ -171,6 +173,12 @@ class WarpTpeSampler(CachedTPESampler):
         alpha: Optional[float] = None,
         trial_user_attrs_fn: Optional[Callable[..., None]] = None,
     ) -> None:
+        # Persist constructor inputs for clone().
+        self._init_cfg = cfg
+        self._init_policy = policy
+        self._init_alpha = alpha
+        self._init_trial_user_attrs_fn = trial_user_attrs_fn
+
         self.cfg = cfg
         self._trial_user_attrs_fn = (
             trial_user_attrs_fn
@@ -232,6 +240,73 @@ class WarpTpeSampler(CachedTPESampler):
 
         # Optional explicit blackbox time override (seconds) for the *next* observe().
         self._override_blackbox_s: Optional[float] = None
+
+    # ---------------- cloning / reseeding ----------------
+
+    def clone(self) -> "WarpTpeSampler":
+        """Create a fresh sampler instance with identical configuration.
+
+        Notes
+        -----
+        * The embedded budget policy (if any) is also cloned.
+        * The returned sampler does **not** share mutable state (caches, counters, RNG state).
+        """
+
+        policy = self._init_policy
+        policy_clone = None
+        if policy is not None:
+            # Prefer explicit clone() when available, otherwise deepcopy as best effort.
+            clone_meth = getattr(policy, "clone", None)
+            if callable(clone_meth):
+                policy_clone = clone_meth()
+            else:
+                try:
+                    policy_clone = copy.deepcopy(policy)
+                except Exception:
+                    raise TypeError(
+                        "Failed to clone explicit policy. Provide a policy with a clone() "
+                        "method or ensure it is deepcopy()-able."
+                    )
+
+        return WarpTpeSampler(
+            self._init_cfg,
+            policy=policy_clone,
+            alpha=self._init_alpha,
+            trial_user_attrs_fn=self._init_trial_user_attrs_fn,
+        )
+
+    def reseed_rng(self) -> None:
+        """Reseed the internal RNGs (TPE + embedded policy).
+
+        Optuna calls ``reseed_rng`` when running ``Study.optimize(n_jobs>1)``.
+        In addition to the base TPE RNGs, WarpTpeSampler also reseeds the embedded
+        budget policy RNG (if present) to reduce cross-thread correlation.
+        """
+
+        super().reseed_rng()
+
+        pol = getattr(self, "_policy", None)
+        if pol is None:
+            return
+
+        # Prefer a dedicated reseed method if the policy provides it.
+        reseed = getattr(pol, "reseed_rng", None)
+        if callable(reseed):
+            reseed()
+            return
+
+        # Otherwise, try to reseed a conventional ``_rng`` attribute.
+        rng = getattr(pol, "_rng", None)
+        if rng is None or not hasattr(rng, "seed"):
+            return
+
+        # Derive a per-call entropy-ish seed (thread id + object id + time).
+        # This is sufficient to decorrelate parallel workers.
+        seed = (id(self) ^ threading.get_ident() ^ int(time.time_ns())) & 0xFFFFFFFF
+        try:
+            rng.seed(int(seed))
+        except Exception:
+            return
 
     # ---------------- public API ----------------
 
